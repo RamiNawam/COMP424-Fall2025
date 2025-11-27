@@ -5,15 +5,32 @@
 ## Setup
 To setup your Python environment, we highly suggest using virtualenv to keep your dependencies in order. Run:
 ```bash
-python3 -m venv venv
+python3.10 -m venv env_name
 ```
 and then:
 ```
-source venv/bin/activate
+source env_name/bin/activate
 ```
 to create and activate your virtual environment. Note: You will need to activate your virtual environment every time you start a new shell. It should appear as:
 ```
-(venv) <username@machine>:~/your/path/to/project$ 
+(env_name) <username@machine>:~/your/path/to/project$ 
+```
+
+Ensure that you have properly installed pip and python in your venv. To check this, you can run:
+```
+which pip
+```
+If you get something like:
+```
+/usr/bin/pip
+```
+rather than :
+```
+/path/to/your/venv/bin/pip
+```
+Then you may need to run:
+```
+python -m pip install --upgrade pip
 ```
 
 To setup the game, clone this repository and install the dependencies. Be sure to have your virtual environment activated.
@@ -48,7 +65,7 @@ python simulator.py --player_1 human_agent --player_2 random_agent --display
 ```
 
 ## Autoplaying multiple games
-There is some randomness affecting the outcome of the game from the initial layout and agent logic. To fairly evaluate agents, we will run them against each other multiple times, alternating their roles as player_1 and player_2, and on various board sizes that are selected randomly (between size 6 and 12). The aggregate win percentage will determine a fair winner. Use the `--autoplay` flag to run $n$ games sequentially, where $n$ can be set using `--autoplay_runs`. The default is 100, and will be used for the final player vs. player run.
+There is some randomness affecting the outcome of the game from the initial layout and agent logic. To fairly evaluate agents, we will run them against each other multiple times, alternating their roles as player_1 and player_2. All board will be of size 7 x 7. The aggregate win percentage will determine a fair winner. Use the `--autoplay` flag to run $n$ games sequentially, where $n$ can be set using `--autoplay_runs`. The default is 100, and will be used for the final player vs. player run.
 
 ```bash
 python simulator.py --player_1 random_agent --player_2 random_agent --autoplay
@@ -143,6 +160,39 @@ git remote add private <your-github-repo-link>
 git push private main
 ```
 And then you should continue using this as you update your changes!
+
+## Maximum Memory Measurements
+Measure using:
+```
+/usr/bin/time -v python simulator.py --player_1 random_agent --player_2 <your-agent> --autoplay
+```
+and then you should see something like:
+```
+Command being timed: "python simulator.py --player_1 random_agent --player_2 random_agent --autoplay"
+        User time (seconds): 8.77
+        System time (seconds): 0.28
+        Percent of CPU this job got: 35%
+        Elapsed (wall clock) time (h:mm:ss or m:ss): 0:25.60
+        Average shared text size (kbytes): 0
+        Average unshared data size (kbytes): 0
+        Average stack size (kbytes): 0
+        Average total size (kbytes): 0
+        Maximum resident set size (kbytes): 61056
+        Average resident set size (kbytes): 0
+        Major (requiring I/O) page faults: 188
+        Minor (reclaiming a frame) page faults: 23247
+        Voluntary context switches: 1682
+        Involuntary context switches: 687
+        Swaps: 0
+        File system inputs: 48512
+        File system outputs: 0
+        Socket messages sent: 0
+        Socket messages received: 0
+        Signals delivered: 0
+        Page size (bytes): 4096
+        Exit status: 0
+```
+where the max resident set size is the most RAM that you have used (in kilobytes).
 
 ## Issues? Bugs? Questions?
 

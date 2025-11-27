@@ -20,39 +20,49 @@ class StudentAgent(Agent):
     self.name = "StudentAgent"
     # Time limit for iterative deepening (2 seconds max as mentioned in comments)
     self.time_limit = 2.0
-    # Maximum depth for search
-    self.max_depth = 10
+    # Maximum depth for search - reduced for better time management
+    self.max_depth = 4  # Focus on quality over depth
 
   def evaluate_board(self, chess_board, player, opponent):
     """
-    Evaluation function for the Ataxx board state.
-    Returns a score where positive values favor the maximizing player (current player).
-    Higher scores indicate better positions for the player.
+    Optimized evaluation function for Ataxx based on greedy agent analysis.
+    Uses balanced weights similar to the winning greedy approach.
     """
     # Count pieces for each player
     player_pieces = np.sum(chess_board == player)
     opponent_pieces = np.sum(chess_board == opponent)
 
-    # Basic piece difference (this is the most important factor)
-    score = player_pieces - opponent_pieces
+    # Basic piece difference (primary factor but not over-weighted)
+    piece_score = player_pieces - opponent_pieces
 
-    # Bonus for controlling corners (very important in Ataxx)
+    # Corner control (very important in Ataxx - matches greedy agent approach)
     board_size = chess_board.shape[0]
     corners = [(0, 0), (0, board_size-1), (board_size-1, 0), (board_size-1, board_size-1)]
-    corner_bonus = 0
+    corner_score = 0
     for corner in corners:
       if chess_board[corner[0], corner[1]] == player:
-        corner_bonus += 10  # Strong bonus for controlling corners
+        corner_score += 8  # Strong bonus for corners (slightly less than greedy's 5x3=15)
       elif chess_board[corner[0], corner[1]] == opponent:
-        corner_bonus -= 10  # Strong penalty if opponent controls corners
+        corner_score -= 8  # Strong penalty for opponent corners
 
-    # Mobility bonus (number of available moves) - less important than pieces
-    player_moves = len(get_valid_moves(chess_board, player))
+    # Mobility (opponent mobility penalty - matches greedy approach)
     opponent_moves = len(get_valid_moves(chess_board, opponent))
-    mobility_score = (player_moves - opponent_moves) * 2
+    mobility_penalty = -opponent_moves * 3  # Stronger penalty than greedy's -1x
 
-    # Combine scores with weights
-    total_score = score * 10 + corner_bonus + mobility_score
+    # Edge control bonus (second-row pieces are valuable)
+    edge_bonus = 0
+    for i in range(board_size):
+      for j in range(board_size):
+        if chess_board[i, j] == player:
+          # Bonus for being near edges (defensive position)
+          if i == 0 or i == board_size-1 or j == 0 or j == board_size-1:
+            edge_bonus += 1
+        elif chess_board[i, j] == opponent:
+          if i == 0 or i == board_size-1 or j == 0 or j == board_size-1:
+            edge_bonus -= 1
+
+    # Combine scores with balanced weights (learned from greedy agent)
+    total_score = piece_score * 3 + corner_score + mobility_penalty + edge_bonus
 
     return total_score
 
@@ -146,29 +156,28 @@ class StudentAgent(Agent):
 
   def order_moves(self, chess_board, valid_moves, player, opponent):
     """
-    Order moves to improve alpha-beta pruning efficiency in Ataxx.
-    Prioritize moves that capture more opponent pieces (duplication + jump moves).
+    Order moves using evaluation function for better alpha-beta pruning.
+    Simulates each move and evaluates the resulting position.
     """
     move_scores = []
 
     for move_coords in valid_moves:
-      # Simulate the move to see how many pieces we gain
+      # Simulate the move
       board_copy = deepcopy(chess_board)
-      try:
-        pieces_gained = count_disc_count_change(board_copy, move_coords, player)
-        move_scores.append((pieces_gained, move_coords))
-      except:
-        # If simulation fails, give neutral score
-        move_scores.append((0, move_coords))
+      execute_move(board_copy, move_coords, player)
 
-    # Sort by pieces gained (descending) - best moves first
+      # Evaluate the resulting position
+      eval_score = self.evaluate_board(board_copy, player, opponent)
+      move_scores.append((eval_score, move_coords))
+
+    # Sort by evaluation score (descending) - best moves first
     move_scores.sort(key=lambda x: x[0], reverse=True)
     return [move_coords for _, move_coords in move_scores]
 
   def iterative_deepening_search(self, chess_board, player, opponent):
     """
-    Perform iterative deepening search for Ataxx with time limit.
-    Gradually increases search depth until time runs out, then returns best move found.
+    Optimized iterative deepening with better time management.
+    Focus on quality at shallower depths rather than deep but rushed search.
     """
     start_time = time.time()
     best_move = None
@@ -178,11 +187,19 @@ class StudentAgent(Agent):
     if not valid_moves:
       return None
 
+    # If few moves available, we can afford deeper search
+    num_moves = len(valid_moves)
+    if num_moves <= 10:
+      max_depth = min(4, self.max_depth)  # Allow deeper search for critical positions
+    else:
+      max_depth = min(2, self.max_depth)  # Stick to shallow search for complex positions
+
     # Start with depth 1 and increase
-    for depth in range(1, self.max_depth + 1):
+    for depth in range(1, max_depth + 1):
       try:
-        # Check if we have time for this depth
-        if time.time() - start_time > self.time_limit * 0.5:  # Use 50% of time limit
+        # More aggressive time management
+        time_spent = time.time() - start_time
+        if time_spent > self.time_limit * 0.7:  # Use 70% of time
           break
 
         # Run minimax for this depth
@@ -191,16 +208,13 @@ class StudentAgent(Agent):
 
         if move is not None:
           best_move = move
-          # Debug output for first few depths
-          if depth <= 3:
-            print(f"Depth {depth}: eval={eval_score}, move=({move.get_dest()})")
 
-        # Check time after each depth
-        if time.time() - start_time > self.time_limit:
+        # Emergency break if we're running out of time
+        if time.time() - start_time > self.time_limit * 0.9:
           break
 
       except Exception as e:
-        print(f"Error at depth {depth}: {e}")
+        # Silently handle errors and use best move found so far
         break
 
     return best_move
@@ -208,17 +222,7 @@ class StudentAgent(Agent):
   def step(self, chess_board, player, opponent):
     """
     Implement the step function of your agent here.
-    You can use the following variables to access the Ataxx board:
-    - chess_board: a numpy array of shape (board_size, board_size)
-      where 0 represents an empty spot, 1 represents Player 1's pieces (Blue),
-      and 2 represents Player 2's pieces (Brown), 3 represents obstacles.
-    - player: 1 if this agent is playing as Player 1 (Blue), or 2 if playing as Player 2 (Brown).
-    - opponent: 1 if the opponent is Player 1 (Blue), or 2 if the opponent is Player 2 (Brown).
-
-    You should return a MoveCoordinates object specifying the source and destination
-    of your move. Use functions in helpers to determine valid moves and more helpful tools.
-
-    Please check the sample implementation in agents/random_agent.py or agents/human_agent.py for more details.
+    Uses optimized minimax with fallback to greedy evaluation.
     """
 
     start_time = time.time()
@@ -228,24 +232,42 @@ class StudentAgent(Agent):
 
     # If no valid moves, return a random move (though this shouldn't happen in normal play)
     if not valid_moves:
-      print("No valid moves available, using random move")
       time_taken = time.time() - start_time
       print(f"My AI's turn took {time_taken:.3f} seconds.")
       return random_move(chess_board, player)
 
-    # Use iterative deepening search to find the best move
+    # Try iterative deepening search first
     best_move = self.iterative_deepening_search(chess_board, player, opponent)
 
-    # If search failed or timed out, fall back to random move
+    # If search failed or timed out, use greedy evaluation of all moves
     if best_move is None:
-      print("Search failed or timed out, using random move")
-      time_taken = time.time() - start_time
-      print(f"My AI's turn took {time_taken:.3f} seconds.")
-      return random_move(chess_board, player)
+      print("Using optimized greedy fallback...")
+      best_move = self.greedy_best_move(chess_board, valid_moves, player, opponent)
 
     time_taken = time.time() - start_time
     print(f"My AI's turn took {time_taken:.3f} seconds.")
 
-    # Return the MoveCoordinates object directly
+    return best_move
+
+  def greedy_best_move(self, chess_board, valid_moves, player, opponent):
+    """
+    Fallback method: evaluate all moves greedily (like the winning agent).
+    Returns the best move according to evaluation function.
+    """
+    best_move = None
+    best_score = float('-inf')
+
+    for move_coords in valid_moves:
+      # Simulate the move
+      board_copy = deepcopy(chess_board)
+      execute_move(board_copy, move_coords, player)
+
+      # Evaluate the resulting position
+      move_score = self.evaluate_board(board_copy, player, opponent)
+
+      if move_score > best_score:
+        best_score = move_score
+        best_move = move_coords
+
     return best_move
 

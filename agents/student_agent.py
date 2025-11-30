@@ -1,310 +1,429 @@
-# Student agent: Add your own agent here
+# Student agent: Ataxx iterative deepening minimax with alpha-beta pruning.
 from agents.agent import Agent
 from store import register_agent
-import sys
+
 import numpy as np
-from copy import deepcopy
 import time
-from helpers import random_move, execute_move, check_endgame, get_valid_moves, MoveCoordinates, count_disc_count_change
+
+from helpers import (
+    check_endgame,
+    get_valid_moves,
+    MoveCoordinates,
+    count_disc_count_change,
+    get_directions,
+)
+
 
 @register_agent("student_agent")
 class StudentAgent(Agent):
-  """
-  An intelligent Ataxx agent using minimax with alpha-beta pruning.
-  Implements iterative deepening, evaluation function with game-specific heuristics,
-  and move ordering for optimal performance within time constraints.
-  """
-
-  def __init__(self):
-    super(StudentAgent, self).__init__()
-    self.name = "StudentAgent"
-    # Time limit for iterative deepening (2 seconds max as mentioned in comments)
-    self.time_limit = 2.0
-    # Maximum depth for search - optimized for competitive play
-    self.max_depth = 6  # Deeper search for critical positions
-
-  def evaluate_board(self, chess_board, player, opponent):
     """
-    Refined evaluation based on greedy agent with strategic tie-breaking bonuses.
-    Uses the proven formula but adds small bonuses to prefer certain move types.
+    Tournament-ready Ataxx agent using iterative deepening alpha-beta search
+    with dynamic heuristics and in-place move/undo to maximize depth under
+    the COMP424 time constraints.
     """
-    # Count pieces for each player
-    player_pieces = np.sum(chess_board == player)
-    opponent_pieces = np.sum(chess_board == opponent)
 
-    # Piece difference (core component)
-    score_diff = player_pieces - opponent_pieces
+    def __init__(self):
+        super(StudentAgent, self).__init__()
+        self.name = "StudentAgent"
+        self.time_limit = 1.95  # stay safely below the 2s tournament cap
+        self.max_depth_reached = 0
 
-    # Corner control (exact match to greedy agent: +5 per owned corner)
-    board_size = chess_board.shape[0]
-    corners = [(0, 0), (0, board_size-1), (board_size-1, 0), (board_size-1, board_size-1)]
-    corner_bonus = sum(1 for (i, j) in corners if chess_board[i, j] == player) * 5
+        # Geometry caches, initialized lazily per board size
+        self.edges = None
+        self.corners = None
+        self.x_squares = None
+        self.c_squares = None
 
-    # Mobility penalty (exact match to greedy agent: -1 * opponent moves)
-    opp_moves = len(get_valid_moves(chess_board, opponent))
-    mobility_penalty = -opp_moves
+        # Direction cache for frontier calculations
+        self.frontier_dirs = get_directions()
 
-    # Small center control bonus (minimal enhancement)
-    center_bonus = 0
-    center_pos = board_size // 2
-    if chess_board[center_pos, center_pos] == player:
-      center_bonus += 1
-    elif chess_board[center_pos, center_pos] == opponent:
-      center_bonus -= 1
+    # ------------------------------------------------------------------
+    # Entry point
+    # ------------------------------------------------------------------
+    def step(self, chess_board, player, opponent):
+        self._ensure_geometry(chess_board.shape[0])
+        self.max_depth_reached = 0
 
-    return score_diff + corner_bonus + mobility_penalty + center_bonus
+        valid_moves = get_valid_moves(chess_board, player)
+        if not valid_moves:
+            return None
 
-  def minimax_alpha_beta(self, chess_board, depth, alpha, beta, maximizing_player, player, opponent, start_time):
-    """
-    Minimax algorithm with alpha-beta pruning for Ataxx.
-    Returns (best_value, best_move) where best_value is the evaluation score
-    and best_move is the optimal MoveCoordinates object.
-    """
-    # Check time limit
-    if time.time() - start_time > self.time_limit:
-      return (self.evaluate_board(chess_board, player if maximizing_player else opponent,
-                                 opponent if maximizing_player else player), None)
+        start_time = time.time()
+        best_move = valid_moves[0]
+        depth = 1
+        board_copy = chess_board.copy()
 
-    # Terminal node or max depth reached
-    is_endgame, p1_score, p2_score = check_endgame(chess_board)
-    if depth == 0 or is_endgame:
-      if is_endgame:
-        # Game over - calculate final score
+        while True:
+            if time.time() - start_time >= self.time_limit:
+                break
+            try:
+                value, move = self._alpha_beta_root(
+                    board_copy,
+                    depth,
+                    float("-inf"),
+                    float("inf"),
+                    player,
+                    opponent,
+                    start_time,
+                )
+                if move is not None:
+                    best_move = move
+            except TimeoutError:
+                break
+            depth += 1
+
+        return best_move
+
+    # ------------------------------------------------------------------
+    # Geometry helpers
+    # ------------------------------------------------------------------
+    def _ensure_geometry(self, size):
+        if self.edges is not None:
+            return
+
+        edges = set()
+        for i in range(size):
+            edges.add((0, i))
+            edges.add((size - 1, i))
+            edges.add((i, 0))
+            edges.add((i, size - 1))
+        self.edges = edges
+
+        self.corners = {
+            (0, 0),
+            (0, size - 1),
+            (size - 1, 0),
+            (size - 1, size - 1),
+        }
+
+        self.x_squares = {
+            (1, 1),
+            (1, size - 2),
+            (size - 2, 1),
+            (size - 2, size - 2),
+        }
+
+        self.c_squares = {
+            (0, 1),
+            (1, 0),
+            (0, size - 2),
+            (1, size - 1),
+            (size - 1, 1),
+            (size - 2, 0),
+            (size - 1, size - 2),
+            (size - 2, size - 1),
+        }
+
+    # ------------------------------------------------------------------
+    # Alpha-beta core
+    # ------------------------------------------------------------------
+    def _alpha_beta_root(
+        self,
+        board,
+        depth,
+        alpha,
+        beta,
+        player,
+        opponent,
+        start_time,
+    ):
+        if time.time() - start_time >= self.time_limit:
+            raise TimeoutError
+
+        best_value = float("-inf")
+        best_move = None
+
+        moves = get_valid_moves(board, player)
+        if not moves:
+            score = self._evaluate(board, player, opponent)
+            return score, None
+
+        ordered = self._order_moves(moves, board, player)
+
+        for move in ordered:
+            if time.time() - start_time >= self.time_limit:
+                raise TimeoutError
+
+            changes = self._execute_move_inplace(board, move, player)
+
+            if depth > self.max_depth_reached:
+                self.max_depth_reached = depth
+
+            value = self._minimax(
+                board,
+                depth - 1,
+                alpha,
+                beta,
+                maximizing_player=False,
+                root_player=player,
+                opponent=opponent,
+                start_time=start_time,
+            )
+
+            self._undo_move(board, changes)
+
+            if value > best_value:
+                best_value = value
+                best_move = move
+
+            alpha = max(alpha, best_value)
+            if beta <= alpha:
+                break
+
+        return best_value, best_move
+
+    def _minimax(
+        self,
+        board,
+        depth,
+        alpha,
+        beta,
+        maximizing_player,
+        root_player,
+        opponent,
+        start_time,
+    ):
+        if time.time() - start_time >= self.time_limit:
+            raise TimeoutError
+
+        if depth > self.max_depth_reached:
+            self.max_depth_reached = depth
+
+        is_end, p1, p2 = check_endgame(board)
+        if is_end:
+            return p1 - p2 if root_player == 1 else p2 - p1
+
+        if depth == 0:
+            return self._evaluate(board, root_player, opponent)
+
+        current_player = root_player if maximizing_player else opponent
+        moves = get_valid_moves(board, current_player)
+
+        if not moves:
+            return self._minimax(
+                board,
+                depth - 1,
+                alpha,
+                beta,
+                not maximizing_player,
+                root_player,
+                opponent,
+                start_time,
+            )
+
+        ordered = self._order_moves(moves, board, current_player)
+
         if maximizing_player:
-          if player == 1:
-            return (p1_score - p2_score, None)
-          else:
-            return (p2_score - p1_score, None)
+            value = float("-inf")
+            for move in ordered:
+                if time.time() - start_time >= self.time_limit:
+                    raise TimeoutError
+                changes = self._execute_move_inplace(board, move, current_player)
+                value = max(
+                    value,
+                    self._minimax(
+                        board,
+                        depth - 1,
+                        alpha,
+                        beta,
+                        False,
+                        root_player,
+                        opponent,
+                        start_time,
+                    ),
+                )
+                self._undo_move(board, changes)
+                alpha = max(alpha, value)
+                if beta <= alpha:
+                    break
+            return value
+
         else:
-          if player == 1:
-            return (p2_score - p1_score, None)
-          else:
-            return (p1_score - p2_score, None)
-      else:
-        # Depth limit reached - use evaluation function
-        return (self.evaluate_board(chess_board, player if maximizing_player else opponent,
-                                   opponent if maximizing_player else player), None)
+            value = float("inf")
+            for move in ordered:
+                if time.time() - start_time >= self.time_limit:
+                    raise TimeoutError
+                changes = self._execute_move_inplace(board, move, current_player)
+                value = min(
+                    value,
+                    self._minimax(
+                        board,
+                        depth - 1,
+                        alpha,
+                        beta,
+                        True,
+                        root_player,
+                        opponent,
+                        start_time,
+                    ),
+                )
+                self._undo_move(board, changes)
+                beta = min(beta, value)
+                if beta <= alpha:
+                    break
+            return value
 
-    current_player = player if maximizing_player else opponent
-    valid_moves = get_valid_moves(chess_board, current_player)
+    # ------------------------------------------------------------------
+    # Move ordering & execution helpers
+    # ------------------------------------------------------------------
+    def _order_moves(self, moves, board, player):
+        opponent = 1 if player == 2 else 2
+        center = board.shape[0] // 2
 
-    # No valid moves - pass turn
-    if not valid_moves:
-      return self.minimax_alpha_beta(chess_board, depth - 1, alpha, beta,
-                                   not maximizing_player, player, opponent, start_time)
+        player_moves = len(get_valid_moves(board, player))
+        opponent_moves = len(get_valid_moves(board, opponent))
+        mobility_diff = player_moves - opponent_moves
 
-    if maximizing_player:
-      max_eval = float('-inf')
-      best_move = None
+        def score(move_coords: MoveCoordinates):
+            dest = move_coords.get_dest()
+            if dest in self.corners:
+                return 10000
+            if dest in self.x_squares:
+                return -10000
+            if dest in self.c_squares:
+                return -5000
 
-      # Order moves (simple heuristic: prefer moves that capture more pieces)
-      ordered_moves = self.order_moves(chess_board, valid_moves, current_player, opponent)
+            row_bias = dest[0] if player == 1 else (board.shape[0] - 1 - dest[0])
+            center_bonus = -(
+                abs(dest[0] - center) + abs(dest[1] - center)
+            )
+            edge_bonus = 10 if dest in self.edges else 0
+            return mobility_diff * 10 + row_bias * 5 + center_bonus + edge_bonus
 
-      for move_coords in ordered_moves:
-        # Create a deep copy for simulation
-        board_copy = deepcopy(chess_board)
-        execute_move(board_copy, move_coords, current_player)
+        return sorted(moves, key=score, reverse=True)
 
-        eval_score, _ = self.minimax_alpha_beta(board_copy, depth - 1, alpha, beta,
-                                              False, player, opponent, start_time)
+    def _execute_move_inplace(self, board, move_coords: MoveCoordinates, player: int):
+        changes = []
+        opponent = 1 if player == 2 else 2
+        size = board.shape[0]
 
-        if eval_score > max_eval:
-          max_eval = eval_score
-          best_move = move_coords
+        r_dest, c_dest = move_coords.get_dest()
+        r_src, c_src = move_coords.get_src()
 
-        alpha = max(alpha, eval_score)
-        if beta <= alpha:
-          break  # Alpha-beta pruning
+        changes.append((r_dest, c_dest, board[r_dest, c_dest]))
+        board[r_dest, c_dest] = player
 
-      return (max_eval, best_move)
-    else:
-      min_eval = float('inf')
-      best_move = None
+        for dr, dc in get_directions():
+            nr, nc = r_dest + dr, c_dest + dc
+            if 0 <= nr < size and 0 <= nc < size and board[nr, nc] == opponent:
+                changes.append((nr, nc, board[nr, nc]))
+                board[nr, nc] = player
 
-      # Order moves for minimizing player too
-      ordered_moves = self.order_moves(chess_board, valid_moves, current_player, opponent)
+        if abs(r_dest - r_src) == 2 or abs(c_dest - c_src) == 2:
+            changes.append((r_src, c_src, board[r_src, c_src]))
+            board[r_src, c_src] = 0
 
-      for move_coords in ordered_moves:
-        # Create a deep copy for simulation
-        board_copy = deepcopy(chess_board)
-        execute_move(board_copy, move_coords, current_player)
+        return changes
 
-        eval_score, _ = self.minimax_alpha_beta(board_copy, depth - 1, alpha, beta,
-                                              True, player, opponent, start_time)
+    def _undo_move(self, board, changes):
+        for r, c, old_val in reversed(changes):
+            board[r, c] = old_val
 
-        if eval_score < min_eval:
-          min_eval = eval_score
-          best_move = move_coords
+    # ------------------------------------------------------------------
+    # Evaluation
+    # ------------------------------------------------------------------
+    def _evaluate(self, board, player, opponent):
+        size = board.shape[0]
+        total_cells = size * size
+        filled = np.count_nonzero(board)
+        empty = total_cells - filled
+        progress = filled / total_cells
 
-        beta = min(beta, eval_score)
-        if beta <= alpha:
-          break  # Alpha-beta pruning
+        if progress < 0.30:
+            DISC_DIFF_WEIGHT = 0
+            MOBILITY_WEIGHT = 100
+            CORNER_WEIGHT = 75
+            PARITY_WEIGHT = 0
+            CAPTURE_WEIGHT = 0
+            STABILITY_WEIGHT = 7
+        elif progress < 0.66:
+            DISC_DIFF_WEIGHT = 7
+            MOBILITY_WEIGHT = 180
+            CORNER_WEIGHT = 250
+            PARITY_WEIGHT = 0
+            CAPTURE_WEIGHT = 5
+            STABILITY_WEIGHT = 100
+        elif self.max_depth_reached >= empty:
+            DISC_DIFF_WEIGHT = 100
+            MOBILITY_WEIGHT = 0
+            CORNER_WEIGHT = 0
+            PARITY_WEIGHT = 0
+            CAPTURE_WEIGHT = 0
+            STABILITY_WEIGHT = 0
+        else:
+            DISC_DIFF_WEIGHT = 15
+            MOBILITY_WEIGHT = 100
+            CORNER_WEIGHT = 120
+            PARITY_WEIGHT = 3
+            CAPTURE_WEIGHT = 25
+            STABILITY_WEIGHT = 35
 
-      return (min_eval, best_move)
+        player_discs = np.count_nonzero(board == player)
+        opponent_discs = np.count_nonzero(board == opponent)
+        disc_diff_score = DISC_DIFF_WEIGHT * (
+            player_discs - opponent_discs
+        ) / (player_discs + opponent_discs + 1)
 
-  def order_moves(self, chess_board, valid_moves, player, opponent):
-    """
-    Simple and effective move ordering based on evaluation function.
-    Prioritizes moves that lead to better board positions.
-    """
-    move_scores = []
+        player_moves = get_valid_moves(board, player)
+        opponent_moves = get_valid_moves(board, opponent)
+        mobility_score = MOBILITY_WEIGHT * (
+            len(player_moves) - len(opponent_moves)
+        ) / (len(player_moves) + len(opponent_moves) + 1)
 
-    for move_coords in valid_moves:
-      # Simulate the move
-      board_copy = deepcopy(chess_board)
-      execute_move(board_copy, move_coords, player)
+        player_corners = sum(1 for pos in self.corners if board[pos] == player)
+        opponent_corners = sum(1 for pos in self.corners if board[pos] == opponent)
+        corner_score = CORNER_WEIGHT * (player_corners - opponent_corners)
 
-      # Evaluate the resulting position
-      eval_score = self.evaluate_board(board_copy, player, opponent)
-      move_scores.append((eval_score, move_coords))
+        player_x = sum(1 for pos in self.x_squares if board[pos] == player)
+        opponent_x = sum(1 for pos in self.x_squares if board[pos] == opponent)
+        x_penalty = -20 * player_x + 7 * opponent_x
 
-    # Sort by evaluation score (descending) - best moves first
-    move_scores.sort(key=lambda x: x[0], reverse=True)
-    return [move_coords for _, move_coords in move_scores]
+        player_c = sum(1 for pos in self.c_squares if board[pos] == player)
+        opponent_c = sum(1 for pos in self.c_squares if board[pos] == opponent)
+        c_penalty = -10 * player_c + 4 * opponent_c
 
-  def iterative_deepening_search(self, chess_board, player, opponent):
-    """
-    Aggressive iterative deepening optimized to beat greedy agent.
-    Uses deeper search for better strategic play.
-    """
-    start_time = time.time()
-    best_move = None
+        parity_score = PARITY_WEIGHT * (1 if empty % 2 == 1 else -1)
 
-    # Get valid moves first
-    valid_moves = get_valid_moves(chess_board, player)
-    if not valid_moves:
-      return None
+        player_captures = sum(
+            count_disc_count_change(board, mv, player) for mv in player_moves
+        )
+        opponent_captures = sum(
+            count_disc_count_change(board, mv, opponent) for mv in opponent_moves
+        )
+        capture_score = CAPTURE_WEIGHT * (
+            player_captures - opponent_captures
+        ) / (player_captures + opponent_captures + 1)
 
-    # Optimized depth strategy with proven evaluation function
-    num_moves = len(valid_moves)
+        player_stable = sum(1 for pos in self.edges if board[pos] == player)
+        opponent_stable = sum(1 for pos in self.edges if board[pos] == opponent)
+        stability_score = STABILITY_WEIGHT * (player_stable - opponent_stable)
 
-    # Use measured depth - not too deep to avoid timeouts, but deep enough for advantage
-    if num_moves <= 8:  # Very few moves - can afford deeper search
-      max_depth = min(5, self.max_depth)
-    elif num_moves <= 20:  # Moderate moves - balanced depth
-      max_depth = min(3, self.max_depth)
-    else:  # Many moves - shallow search to stay within time
-      max_depth = min(2, self.max_depth)
+        frontier_score = self._frontier_delta(board, player, opponent)
 
-    # Start with depth 1 and increase
-    for depth in range(1, max_depth + 1):
-      try:
-        # Balanced time management with proven evaluation
-        time_spent = time.time() - start_time
-        if time_spent > self.time_limit * 0.8:  # Use 80% of time safely
-          break
+        return (
+            disc_diff_score
+            + mobility_score
+            + corner_score
+            + x_penalty
+            + c_penalty
+            + parity_score
+            + capture_score
+            + stability_score
+            + frontier_score
+        )
 
-        # Run minimax for this depth
-        eval_score, move = self.minimax_alpha_beta(chess_board, depth, float('-inf'), float('inf'),
-                                        True, player, opponent, start_time)
+    def _frontier_delta(self, board, player, opponent):
+        return self._count_frontier(board, opponent) - self._count_frontier(board, player)
 
-        if move is not None:
-          best_move = move
-
-        # Emergency break with buffer
-        if time.time() - start_time > self.time_limit * 0.95:
-          break
-
-      except Exception as e:
-        # Silently handle errors and use best move found so far
-        break
-
-    return best_move
-
-  def step(self, chess_board, player, opponent):
-    """
-    Hybrid approach: use deeper search when possible, fallback to perfect greedy evaluation.
-    """
-
-    start_time = time.time()
-
-    # Get valid moves
-    valid_moves = get_valid_moves(chess_board, player)
-
-    # If no valid moves, return a random move (though this shouldn't happen in normal play)
-    if not valid_moves:
-      time_taken = time.time() - start_time
-      print(f"My AI's turn took {time_taken:.3f} seconds.")
-      return random_move(chess_board, player)
-
-    # Use proven perfect greedy evaluation approach
-    print("Using optimized greedy evaluation...")
-    best_move = self.greedy_best_move(chess_board, valid_moves, player, opponent)
-
-    time_taken = time.time() - start_time
-    print(f"My AI's turn took {time_taken:.3f} seconds.")
-
-    return best_move
-
-  def greedy_best_move(self, chess_board, valid_moves, player, opponent):
-    """
-    Perfect greedy evaluation with opening book and tie-breaking.
-    Includes hardcoded optimal opening moves against greedy strategies.
-    """
-    # Use proven evaluation without opening book (corner-first is actually correct)
-
-    best_move = None
-    best_score = float('-inf')
-
-    # Order moves strategically
-    ordered_moves = self.prioritize_moves(valid_moves, chess_board)
-
-    # Evaluate all moves with tie-breaking
-    for move_coords in ordered_moves:
-      # Simulate the move
-      board_copy = deepcopy(chess_board)
-      execute_move(board_copy, move_coords, player)
-
-      # Evaluate the resulting position
-      move_score = self.evaluate_board(board_copy, player, opponent)
-
-      # Add small tie-breaking bonus based on move coordinates
-      # This helps when multiple moves have identical evaluation scores
-      dest_r, dest_c = move_coords.get_dest()
-      tie_breaker = (dest_r * 7 + dest_c) * 0.0001  # Very small coordinate-based bonus
-
-      final_score = move_score + tie_breaker
-
-      if final_score > best_score:
-        best_score = final_score
-        best_move = move_coords
-
-    return best_move
-
-
-  def prioritize_moves(self, valid_moves, chess_board):
-    """
-    Prioritize moves: corners > center > edges > other positions.
-    This helps find optimal moves faster.
-    """
-    move_priority = []
-
-    for move_coords in valid_moves:
-      dest_r, dest_c = move_coords.get_dest()
-      board_size = chess_board.shape[0]
-
-      # Calculate priority score
-      priority = 0
-
-      # Highest priority: corners
-      if (dest_r in [0, board_size-1] and dest_c in [0, board_size-1]):
-        priority = 100
-
-      # High priority: center area
-      elif abs(dest_r - board_size//2) <= 1 and abs(dest_c - board_size//2) <= 1:
-        priority = 50
-
-      # Medium priority: edge-adjacent positions
-      elif (dest_r in [1, board_size-2] or dest_c in [1, board_size-2]):
-        priority = 25
-
-      # Low priority: other positions
-      else:
-        priority = 0
-
-      move_priority.append((priority, move_coords))
-
-    # Sort by priority (highest first), then by original order for stability
-    move_priority.sort(key=lambda x: (-x[0], valid_moves.index(x[1])))
-    return [move for _, move in move_priority]
+    def _count_frontier(self, board, player):
+        positions = np.argwhere(board == player)
+        frontier = 0
+        size = board.shape[0]
+        for r, c in positions:
+            for dr, dc in self.frontier_dirs:
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < size and 0 <= nc < size and board[nr, nc] == 0:
+                    frontier += 1
+                    break
+        return frontier
 

@@ -1,13 +1,14 @@
-- name: "Rami EL-NAWAM"
-  mcgill_id: 261 087 427
+- name: Pierre EL-Boustany
+  mcgill_id: 261076411
+  email: pierre.elboustany@mail.mcgill.ca
+
+- name: Rami EL-NAWAM
+  mcgill_id: 261087427
   email: rami.elnawam@mail.mcgill.ca
 
-- name: "Pierre EL-Boustany"
-  mcgill_id: "261076411"
-  email: "pierre.elboustany@mail.mcgill.ca"
 
-- name: "Shireen Bazzari"
-  mcgill_id: "261077744"
-  email: "shireen.bazzari@mail.mcgill.ca"
+- name: Shireen Bazzari
+  mcgill_id: 261077744
+  email: shireen.bazzari@mail.mcgill.ca
 
   

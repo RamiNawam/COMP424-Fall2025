@@ -1,429 +1,406 @@
-# Student agent: Ataxx iterative deepening minimax with alpha-beta pruning.
 from agents.agent import Agent
 from store import register_agent
-
 import numpy as np
 import time
-
-from helpers import (
-    check_endgame,
-    get_valid_moves,
-    MoveCoordinates,
-    count_disc_count_change,
-    get_directions,
-)
+from helpers import execute_move, check_endgame, get_valid_moves
 
 
 @register_agent("student_agent")
 class StudentAgent(Agent):
-    """
-    Tournament-ready Ataxx agent using iterative deepening alpha-beta search
-    with dynamic heuristics and in-place move/undo to maximize depth under
-    the COMP424 time constraints.
-    """
 
     def __init__(self):
-        super(StudentAgent, self).__init__()
+        super().__init__()
         self.name = "StudentAgent"
-        self.time_limit = 1.95  # stay safely below the 2s tournament cap
-        self.max_depth_reached = 0
+        # Time limit per move (seconds); keep a small safety buffer under 2s
+        self.time_limit = 1.95
+        # Logical maximum search depth (iterative deepening will stop earlier if needed)
+        self.max_depth = 20
 
-        # Geometry caches, initialized lazily per board size
-        self.edges = None
-        self.corners = None
-        self.x_squares = None
-        self.c_squares = None
-
-        # Direction cache for frontier calculations
-        self.frontier_dirs = get_directions()
+        # --- State used for adaptive opponent modeling ---
+        self.prev_board = None              # Board position after our last move
+        self.opponent_is_greedy = None      # None = unknown, True/False once inferred
+        self.greedy_match_count = 0         # How many times opponent matched greedy move
+        self.total_observed_moves = 0       # How many opponent moves we could analyse
 
     # ------------------------------------------------------------------
-    # Entry point
+    #  GREEDY AGENT EVALUATION (for opponent modeling)
     # ------------------------------------------------------------------
-    def step(self, chess_board, player, opponent):
-        self._ensure_geometry(chess_board.shape[0])
-        self.max_depth_reached = 0
+    def greedy_evaluate(self, board, color, opponent):
+        """Approximate the greedy_corners_agent evaluation."""
+        player_count = np.count_nonzero(board == color)
+        opp_count = np.count_nonzero(board == opponent)
+        score_diff = player_count - opp_count
 
-        valid_moves = get_valid_moves(chess_board, player)
-        if not valid_moves:
+        n = board.shape[0]
+        corners = [(0, 0), (0, n - 1), (n - 1, 0), (n - 1, n - 1)]
+        corner_bonus = sum(1 for (i, j) in corners if board[i, j] == color) * 5
+
+        opp_moves = len(get_valid_moves(board, opponent))
+        mobility_penalty = -opp_moves
+
+        return score_diff + corner_bonus + mobility_penalty
+
+    # ------------------------------------------------------------------
+    #  PREDICT GREEDY MOVE (used both for modeling and detection)
+    # ------------------------------------------------------------------
+    def predict_greedy_move(self, board, color, opponent):
+        """Return the move that a greedy agent (with greedy_evaluate) would play."""
+        moves = get_valid_moves(board, color)
+        if not moves:
             return None
 
-        start_time = time.time()
-        best_move = valid_moves[0]
-        depth = 1
-        board_copy = chess_board.copy()
+        best_move = None
+        best_score = float("-inf")
 
-        while True:
-            if time.time() - start_time >= self.time_limit:
-                break
-            try:
-                value, move = self._alpha_beta_root(
-                    board_copy,
-                    depth,
-                    float("-inf"),
-                    float("inf"),
-                    player,
-                    opponent,
-                    start_time,
-                )
-                if move is not None:
-                    best_move = move
-            except TimeoutError:
-                break
-            depth += 1
+        for move in moves:
+            board_copy = board.copy()
+            execute_move(board_copy, move, color)
+            score = self.greedy_evaluate(board_copy, color, opponent)
+            if score > best_score:
+                best_score = score
+                best_move = move
 
         return best_move
 
     # ------------------------------------------------------------------
-    # Geometry helpers
+    #  OPPONENT MOVE ANALYSIS: detect if they behave greedily
     # ------------------------------------------------------------------
-    def _ensure_geometry(self, size):
-        if self.edges is not None:
+    def update_opponent_model(self, prev_board, current_board, player, opponent):
+        """Update our belief about whether the opponent plays greedily."""
+        if prev_board is None:
             return
 
-        edges = set()
-        for i in range(size):
-            edges.add((0, i))
-            edges.add((size - 1, i))
-            edges.add((i, 0))
-            edges.add((i, size - 1))
-        self.edges = edges
+        opp_color = opponent
+        opp_moves = get_valid_moves(prev_board, opp_color)
+        if not opp_moves:
+            return
 
-        self.corners = {
-            (0, 0),
-            (0, size - 1),
-            (size - 1, 0),
-            (size - 1, size - 1),
-        }
+        # Reconstruct which move opponent played
+        actual_move = None
+        for move in opp_moves:
+            test_board = prev_board.copy()
+            execute_move(test_board, move, opp_color)
+            if np.array_equal(test_board, current_board):
+                actual_move = move
+                break
 
-        self.x_squares = {
-            (1, 1),
-            (1, size - 2),
-            (size - 2, 1),
-            (size - 2, size - 2),
-        }
+        if actual_move is None:
+            return
 
-        self.c_squares = {
-            (0, 1),
-            (1, 0),
-            (0, size - 2),
-            (1, size - 1),
-            (size - 1, 1),
-            (size - 2, 0),
-            (size - 1, size - 2),
-            (size - 2, size - 1),
-        }
+        greedy_move = self.predict_greedy_move(prev_board, opp_color, player)
+        if greedy_move is None:
+            return
+
+        if actual_move.get_dest() == greedy_move.get_dest():
+            self.greedy_match_count += 1
+        self.total_observed_moves += 1
+
+        min_samples = 5
+        if self.total_observed_moves >= min_samples:
+            ratio = self.greedy_match_count / float(self.total_observed_moves)
+            if ratio >= 0.9:
+                self.opponent_is_greedy = True
+            elif ratio <= 0.5:
+                self.opponent_is_greedy = False
 
     # ------------------------------------------------------------------
-    # Alpha-beta core
+    #  STATIC EVALUATION FUNCTION
     # ------------------------------------------------------------------
-    def _alpha_beta_root(
-        self,
-        board,
-        depth,
-        alpha,
-        beta,
-        player,
-        opponent,
-        start_time,
-    ):
-        if time.time() - start_time >= self.time_limit:
-            raise TimeoutError
+    def evaluate_board(self, board, root_player, opponent):
+        n = board.shape[0]
 
-        best_value = float("-inf")
+        # piece diff
+        player_count = np.count_nonzero(board == root_player)
+        opp_count = np.count_nonzero(board == opponent)
+        score_diff = player_count - opp_count
+
+        # corners
+        corners = [(0, 0), (0, n - 1), (n - 1, 0), (n - 1, n - 1)]
+        corner_bonus_player = sum(1 for (i, j) in corners if board[i, j] == root_player)
+        corner_bonus_opp = sum(1 for (i, j) in corners if board[i, j] == opponent)
+        corner_term = 30 * (corner_bonus_player - corner_bonus_opp)
+
+        # X-squares
+        x_square_penalty = 0
+        x_squares = set()
+        for corner in corners:
+            for dr in (-1, 0, 1):
+                for dc in (-1, 0, 1):
+                    if dr == 0 and dc == 0:
+                        continue
+                    x_sq = (corner[0] + dr, corner[1] + dc)
+                    if 0 <= x_sq[0] < n and 0 <= x_sq[1] < n and x_sq not in corners:
+                        x_squares.add(x_sq)
+
+        for x_sq in x_squares:
+            if board[x_sq[0], x_sq[1]] == root_player:
+                for corner in corners:
+                    if abs(x_sq[0] - corner[0]) <= 1 and abs(x_sq[1] - corner[1]) <= 1:
+                        if board[corner[0], corner[1]] == 0:
+                            x_square_penalty -= 8
+            elif board[x_sq[0], x_sq[1]] == opponent:
+                for corner in corners:
+                    if abs(x_sq[0] - corner[0]) <= 1 and abs(x_sq[1] - corner[1]) <= 1:
+                        if board[corner[0], corner[1]] == 0:
+                            x_square_penalty += 8
+
+        # mobility
+        player_moves = len(get_valid_moves(board, root_player))
+        opp_moves = len(get_valid_moves(board, opponent))
+        mobility_diff = player_moves - opp_moves
+        mobility_term = 4.0 * mobility_diff
+
+        if opp_moves == 0 and player_moves > 0:
+            mobility_term += 40
+        elif player_moves == 0 and opp_moves > 0:
+            mobility_term -= 40
+
+        # stability proxy
+        def quick_stability(color):
+            stable = 0
+            for r in range(n):
+                for c in range(n):
+                    if board[r, c] != color:
+                        continue
+                    friendly = 0
+                    for dr in (-1, 0, 1):
+                        for dc in (-1, 0, 1):
+                            if dr == 0 and dc == 0:
+                                continue
+                            rr, cc = r + dr, c + dc
+                            if 0 <= rr < n and 0 <= cc < n and board[rr, cc] == color:
+                                friendly += 1
+                    stable += friendly
+            return stable
+
+        player_stability = quick_stability(root_player)
+        opp_stability = quick_stability(opponent)
+        stability_term = 0.6 * (player_stability - opp_stability)
+
+        # edges
+        edge_penalty = 0
+        for r in range(n):
+            for c in range(n):
+                if (r == 0 or r == n - 1 or c == 0 or c == n - 1) and (r, c) not in corners:
+                    if board[r, c] == root_player:
+                        edge_penalty -= 1
+                    elif board[r, c] == opponent:
+                        edge_penalty += 1
+
+        # phase weights
+        empty_count = np.count_nonzero(board == 0)
+        total_cells = n * n
+        empties_ratio = empty_count / total_cells
+
+        if empties_ratio > 0.5:  # early
+            w_piece = 0.8
+            w_corner = 1.0
+            w_mobility = 1.2
+            w_stability = 0.4
+            w_edge = 0.3
+        elif empties_ratio > 0.25:  # mid
+            w_piece = 1.5
+            w_corner = 1.0
+            w_mobility = 1.0
+            w_stability = 0.5
+            w_edge = 0.2
+        else:  # late
+            w_piece = 12.0
+            w_corner = 0.7
+            w_mobility = 0.4
+            w_stability = 0.3
+            w_edge = 0.1
+
+        value = (
+            w_piece * score_diff
+            + w_corner * corner_term
+            + w_mobility * mobility_term
+            + w_stability * stability_term
+            + x_square_penalty
+            + w_edge * edge_penalty
+        )
+
+        return value
+
+    # ------------------------------------------------------------------
+    #  MOVE ORDERING
+    # ------------------------------------------------------------------
+    def order_moves(self, board, moves, current_player, root_player, opponent):
+        n = board.shape[0]
+        corners = [(0, 0), (0, n - 1), (n - 1, 0), (n - 1, n - 1)]
+        corner_set = set(corners)
+
+        move_scores = []
+        for move in moves:
+            score = 0
+            dest = move.get_dest()
+
+            # prioritize corners
+            if dest in corner_set:
+                score += 3000
+
+            # approximate local captures: count adjacent opponent discs
+            captures = 0
+            for dr in (-1, 0, 1):
+                for dc in (-1, 0, 1):
+                    if dr == 0 and dc == 0:
+                        continue
+                    rr, cc = dest[0] + dr, dest[1] + dc
+                    if 0 <= rr < n and 0 <= cc < n:
+                        if board[rr, cc] == opponent:
+                            captures += 1
+
+            # slight penalty for non-corner edge moves
+            if dest not in corner_set and (dest[0] == 0 or dest[0] == n - 1 or dest[1] == 0 or dest[1] == n - 1):
+                score -= 20
+
+            score += captures * 200
+            move_scores.append((score, move))
+
+        move_scores.sort(key=lambda x: x[0], reverse=True)
+        return [m for _, m in move_scores]
+
+    # ------------------------------------------------------------------
+    #  MINIMAX WITH ADAPTIVE MODELING
+    # ------------------------------------------------------------------
+    def minimax(self, board, depth, alpha, beta,
+                current_player, maximizing_player,
+                root_player, opponent, start_time, is_opponent_greedy):
+        if time.time() - start_time > self.time_limit:
+            return self.evaluate_board(board, root_player, opponent), None
+
+        is_end, p1, p2 = check_endgame(board)
+        if depth == 0 or is_end:
+            if is_end:
+                if root_player == 1:
+                    return (p1 - p2), None
+                else:
+                    return (p2 - p1), None
+            return self.evaluate_board(board, root_player, opponent), None
+
+        moves = get_valid_moves(board, current_player)
+        if not moves:
+            next_player = opponent if current_player == root_player else root_player
+            return self.minimax(board, depth - 1, alpha, beta,
+                                next_player, not maximizing_player,
+                                root_player, opponent, start_time, is_opponent_greedy)
+
+        # maximizer (our turn)
+        if maximizing_player:
+            best_val = float("-inf")
+            best_move = None
+            ordered = self.order_moves(board, moves, current_player, root_player, opponent)
+            for move in ordered:
+                if time.time() - start_time > self.time_limit:
+                    return self.evaluate_board(board, root_player, opponent), best_move
+                new_board = board.copy()
+                execute_move(new_board, move, current_player)
+                next_player = opponent if current_player == root_player else root_player
+                val, _ = self.minimax(new_board, depth - 1, alpha, beta,
+                                      next_player, False,
+                                      root_player, opponent, start_time, is_opponent_greedy)
+                if val > best_val:
+                    best_val = val
+                    best_move = move
+                alpha = max(alpha, val)
+                if beta <= alpha:
+                    break
+            return best_val, best_move
+
+        # minimizer (opponent's turn)
+        else:
+            # if we are confident opponent is greedy, simulate only their greedy move
+            if is_opponent_greedy and depth > 1:
+                greedy_move = self.predict_greedy_move(board, current_player, root_player)
+                if greedy_move is not None:
+                    new_board = board.copy()
+                    execute_move(new_board, greedy_move, current_player)
+                    next_player = root_player
+                    val, _ = self.minimax(new_board, depth - 1, alpha, beta,
+                                          next_player, True,
+                                          root_player, opponent, start_time, is_opponent_greedy)
+                    return val, greedy_move
+
+            # fallback: full minimax for opponent
+            best_val = float("inf")
+            best_move = None
+            ordered = self.order_moves(board, moves, current_player, root_player, opponent)
+            for move in ordered:
+                if time.time() - start_time > self.time_limit:
+                    return self.evaluate_board(board, root_player, opponent), best_move
+                new_board = board.copy()
+                execute_move(new_board, move, current_player)
+                next_player = root_player
+                val, _ = self.minimax(new_board, depth - 1, alpha, beta,
+                                      next_player, True,
+                                      root_player, opponent, start_time, is_opponent_greedy)
+                if val < best_val:
+                    best_val = val
+                    best_move = move
+                beta = min(beta, val)
+                if beta <= alpha:
+                    break
+            return best_val, best_move
+
+    # ------------------------------------------------------------------
+    #  ITERATIVE DEEPENING
+    # ------------------------------------------------------------------
+    def iterative_deepening(self, board, player, opponent, is_opponent_greedy):
+        start = time.time()
         best_move = None
+        best_val = float("-inf")
+
+        moves = get_valid_moves(board, player)
+        if len(moves) == 1:
+            return moves[0]
+
+        for depth in range(1, self.max_depth + 1):
+            elapsed = time.time() - start
+            if elapsed > self.time_limit * 0.98:
+                break
+            try:
+                val, move = self.minimax(board, depth,
+                                         float("-inf"), float("inf"),
+                                         player, True,
+                                         player, opponent,
+                                         start, is_opponent_greedy)
+                if move is not None:
+                    best_move = move
+                    best_val = val
+                if val > 1000:
+                    break
+                elapsed = time.time() - start
+                if elapsed > self.time_limit * 0.92:
+                    break
+            except Exception:
+                break
+        return best_move
+
+    # ------------------------------------------------------------------
+    #  MAIN STEP
+    # ------------------------------------------------------------------
+    def step(self, board, player, opponent):
+        start = time.time()
+
+        # update opponent model based on their last move
+        if self.prev_board is not None:
+            self.update_opponent_model(self.prev_board, board, player, opponent)
+
+        # if we don't know yet, default to "not greedy" (full minimax)
+        is_greedy = self.opponent_is_greedy if self.opponent_is_greedy is not None else False
 
         moves = get_valid_moves(board, player)
         if not moves:
-            score = self._evaluate(board, player, opponent)
-            return score, None
+            return None
 
-        ordered = self._order_moves(moves, board, player)
+        best_move = self.iterative_deepening(board, player, opponent, is_greedy)
+        if best_move is None:
+            best_move = moves[0]
 
-        for move in ordered:
-            if time.time() - start_time >= self.time_limit:
-                raise TimeoutError
+        # store board after our move for next round's modeling
+        board_copy = board.copy()
+        execute_move(board_copy, best_move, player)
+        self.prev_board = board_copy
 
-            changes = self._execute_move_inplace(board, move, player)
-
-            if depth > self.max_depth_reached:
-                self.max_depth_reached = depth
-
-            value = self._minimax(
-                board,
-                depth - 1,
-                alpha,
-                beta,
-                maximizing_player=False,
-                root_player=player,
-                opponent=opponent,
-                start_time=start_time,
-            )
-
-            self._undo_move(board, changes)
-
-            if value > best_value:
-                best_value = value
-                best_move = move
-
-            alpha = max(alpha, best_value)
-            if beta <= alpha:
-                break
-
-        return best_value, best_move
-
-    def _minimax(
-        self,
-        board,
-        depth,
-        alpha,
-        beta,
-        maximizing_player,
-        root_player,
-        opponent,
-        start_time,
-    ):
-        if time.time() - start_time >= self.time_limit:
-            raise TimeoutError
-
-        if depth > self.max_depth_reached:
-            self.max_depth_reached = depth
-
-        is_end, p1, p2 = check_endgame(board)
-        if is_end:
-            return p1 - p2 if root_player == 1 else p2 - p1
-
-        if depth == 0:
-            return self._evaluate(board, root_player, opponent)
-
-        current_player = root_player if maximizing_player else opponent
-        moves = get_valid_moves(board, current_player)
-
-        if not moves:
-            return self._minimax(
-                board,
-                depth - 1,
-                alpha,
-                beta,
-                not maximizing_player,
-                root_player,
-                opponent,
-                start_time,
-            )
-
-        ordered = self._order_moves(moves, board, current_player)
-
-        if maximizing_player:
-            value = float("-inf")
-            for move in ordered:
-                if time.time() - start_time >= self.time_limit:
-                    raise TimeoutError
-                changes = self._execute_move_inplace(board, move, current_player)
-                value = max(
-                    value,
-                    self._minimax(
-                        board,
-                        depth - 1,
-                        alpha,
-                        beta,
-                        False,
-                        root_player,
-                        opponent,
-                        start_time,
-                    ),
-                )
-                self._undo_move(board, changes)
-                alpha = max(alpha, value)
-                if beta <= alpha:
-                    break
-            return value
-
-        else:
-            value = float("inf")
-            for move in ordered:
-                if time.time() - start_time >= self.time_limit:
-                    raise TimeoutError
-                changes = self._execute_move_inplace(board, move, current_player)
-                value = min(
-                    value,
-                    self._minimax(
-                        board,
-                        depth - 1,
-                        alpha,
-                        beta,
-                        True,
-                        root_player,
-                        opponent,
-                        start_time,
-                    ),
-                )
-                self._undo_move(board, changes)
-                beta = min(beta, value)
-                if beta <= alpha:
-                    break
-            return value
-
-    # ------------------------------------------------------------------
-    # Move ordering & execution helpers
-    # ------------------------------------------------------------------
-    def _order_moves(self, moves, board, player):
-        opponent = 1 if player == 2 else 2
-        center = board.shape[0] // 2
-
-        player_moves = len(get_valid_moves(board, player))
-        opponent_moves = len(get_valid_moves(board, opponent))
-        mobility_diff = player_moves - opponent_moves
-
-        def score(move_coords: MoveCoordinates):
-            dest = move_coords.get_dest()
-            if dest in self.corners:
-                return 10000
-            if dest in self.x_squares:
-                return -10000
-            if dest in self.c_squares:
-                return -5000
-
-            row_bias = dest[0] if player == 1 else (board.shape[0] - 1 - dest[0])
-            center_bonus = -(
-                abs(dest[0] - center) + abs(dest[1] - center)
-            )
-            edge_bonus = 10 if dest in self.edges else 0
-            return mobility_diff * 10 + row_bias * 5 + center_bonus + edge_bonus
-
-        return sorted(moves, key=score, reverse=True)
-
-    def _execute_move_inplace(self, board, move_coords: MoveCoordinates, player: int):
-        changes = []
-        opponent = 1 if player == 2 else 2
-        size = board.shape[0]
-
-        r_dest, c_dest = move_coords.get_dest()
-        r_src, c_src = move_coords.get_src()
-
-        changes.append((r_dest, c_dest, board[r_dest, c_dest]))
-        board[r_dest, c_dest] = player
-
-        for dr, dc in get_directions():
-            nr, nc = r_dest + dr, c_dest + dc
-            if 0 <= nr < size and 0 <= nc < size and board[nr, nc] == opponent:
-                changes.append((nr, nc, board[nr, nc]))
-                board[nr, nc] = player
-
-        if abs(r_dest - r_src) == 2 or abs(c_dest - c_src) == 2:
-            changes.append((r_src, c_src, board[r_src, c_src]))
-            board[r_src, c_src] = 0
-
-        return changes
-
-    def _undo_move(self, board, changes):
-        for r, c, old_val in reversed(changes):
-            board[r, c] = old_val
-
-    # ------------------------------------------------------------------
-    # Evaluation
-    # ------------------------------------------------------------------
-    def _evaluate(self, board, player, opponent):
-        size = board.shape[0]
-        total_cells = size * size
-        filled = np.count_nonzero(board)
-        empty = total_cells - filled
-        progress = filled / total_cells
-
-        if progress < 0.30:
-            DISC_DIFF_WEIGHT = 0
-            MOBILITY_WEIGHT = 100
-            CORNER_WEIGHT = 75
-            PARITY_WEIGHT = 0
-            CAPTURE_WEIGHT = 0
-            STABILITY_WEIGHT = 7
-        elif progress < 0.66:
-            DISC_DIFF_WEIGHT = 7
-            MOBILITY_WEIGHT = 180
-            CORNER_WEIGHT = 250
-            PARITY_WEIGHT = 0
-            CAPTURE_WEIGHT = 5
-            STABILITY_WEIGHT = 100
-        elif self.max_depth_reached >= empty:
-            DISC_DIFF_WEIGHT = 100
-            MOBILITY_WEIGHT = 0
-            CORNER_WEIGHT = 0
-            PARITY_WEIGHT = 0
-            CAPTURE_WEIGHT = 0
-            STABILITY_WEIGHT = 0
-        else:
-            DISC_DIFF_WEIGHT = 15
-            MOBILITY_WEIGHT = 100
-            CORNER_WEIGHT = 120
-            PARITY_WEIGHT = 3
-            CAPTURE_WEIGHT = 25
-            STABILITY_WEIGHT = 35
-
-        player_discs = np.count_nonzero(board == player)
-        opponent_discs = np.count_nonzero(board == opponent)
-        disc_diff_score = DISC_DIFF_WEIGHT * (
-            player_discs - opponent_discs
-        ) / (player_discs + opponent_discs + 1)
-
-        player_moves = get_valid_moves(board, player)
-        opponent_moves = get_valid_moves(board, opponent)
-        mobility_score = MOBILITY_WEIGHT * (
-            len(player_moves) - len(opponent_moves)
-        ) / (len(player_moves) + len(opponent_moves) + 1)
-
-        player_corners = sum(1 for pos in self.corners if board[pos] == player)
-        opponent_corners = sum(1 for pos in self.corners if board[pos] == opponent)
-        corner_score = CORNER_WEIGHT * (player_corners - opponent_corners)
-
-        player_x = sum(1 for pos in self.x_squares if board[pos] == player)
-        opponent_x = sum(1 for pos in self.x_squares if board[pos] == opponent)
-        x_penalty = -20 * player_x + 7 * opponent_x
-
-        player_c = sum(1 for pos in self.c_squares if board[pos] == player)
-        opponent_c = sum(1 for pos in self.c_squares if board[pos] == opponent)
-        c_penalty = -10 * player_c + 4 * opponent_c
-
-        parity_score = PARITY_WEIGHT * (1 if empty % 2 == 1 else -1)
-
-        player_captures = sum(
-            count_disc_count_change(board, mv, player) for mv in player_moves
-        )
-        opponent_captures = sum(
-            count_disc_count_change(board, mv, opponent) for mv in opponent_moves
-        )
-        capture_score = CAPTURE_WEIGHT * (
-            player_captures - opponent_captures
-        ) / (player_captures + opponent_captures + 1)
-
-        player_stable = sum(1 for pos in self.edges if board[pos] == player)
-        opponent_stable = sum(1 for pos in self.edges if board[pos] == opponent)
-        stability_score = STABILITY_WEIGHT * (player_stable - opponent_stable)
-
-        frontier_score = self._frontier_delta(board, player, opponent)
-
-        return (
-            disc_diff_score
-            + mobility_score
-            + corner_score
-            + x_penalty
-            + c_penalty
-            + parity_score
-            + capture_score
-            + stability_score
-            + frontier_score
-        )
-
-    def _frontier_delta(self, board, player, opponent):
-        return self._count_frontier(board, opponent) - self._count_frontier(board, player)
-
-    def _count_frontier(self, board, player):
-        positions = np.argwhere(board == player)
-        frontier = 0
-        size = board.shape[0]
-        for r, c in positions:
-            for dr, dc in self.frontier_dirs:
-                nr, nc = r + dr, c + dc
-                if 0 <= nr < size and 0 <= nc < size and board[nr, nc] == 0:
-                    frontier += 1
-                    break
-        return frontier
-
+        print(f"My AI turn time: {time.time() - start:.4f}s")
+        return best_move
